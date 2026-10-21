@@ -32,7 +32,7 @@ use tycho_client::feed::SynchronizerState;
 use tycho_common::{simulation::protocol_sim::ProtocolSim, Bytes};
 use tycho_execution::encoding::evm::{
     get_router_address, swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
-    utils::bytes_to_address, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_PREFIX,
+    utils::bytes_to_address, PRICE_LEVEL_STREAM_PREFIX,
 };
 use tycho_simulation::{
     book::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
@@ -1053,7 +1053,7 @@ async fn process_update(
     match &update.payload {
         StreamUpdatePayload::Protocol(protocol_update) => info!(
             "Got protocol update with block {}, {} new pairs, and {} states",
-            protocol_update.block_number_or_timestamp,
+            protocol_update.block_number,
             protocol_update.new_pairs.len(),
             protocol_update.states.len()
         ),
@@ -1065,7 +1065,7 @@ async fn process_update(
         ),
         StreamUpdatePayload::PriceLevelStream(pls_update) => info!(
             "Got price level update targeting block {} with {} new pairs and {} states",
-            pls_update.block_number_or_timestamp,
+            pls_update.block_number,
             pls_update.new_pairs.len(),
             pls_update.states.len()
         ),
@@ -1115,7 +1115,7 @@ async fn process_update(
                 current_state.next_update_seq()
             };
 
-            let update_block_number = protocol_update.block_number_or_timestamp;
+            let update_block_number = protocol_update.block_number;
 
             if !update_seq.is_multiple_of(cli.test_every_n_updates) {
                 metrics::record_protocol_update_sampled_out();
@@ -1221,7 +1221,7 @@ async fn process_update(
                 let mut stats = stats
                     .write()
                     .expect("Failed to get write lock for statistics (record block)");
-                stats.record_block_processed(protocol_update.block_number_or_timestamp);
+                stats.record_block_processed(protocol_update.block_number);
             }
 
             block
@@ -1247,7 +1247,7 @@ async fn process_update(
         StreamUpdatePayload::PriceLevelStream(pls_update) => {
             // The quotes target the block Titan was building, so execution is simulated at
             // exactly that block: the overrides carry its timestamp.
-            let target_block = pls_update.block_number_or_timestamp;
+            let target_block = pls_update.block_number;
             let poll_interval = Duration::from_millis(cli.rpc_poll_interval_ms);
             // RPC failures propagate instead of counting as a miss: the miss metric means "the
             // chain did not reach the quoted block", not "the RPC was down".
@@ -2185,9 +2185,7 @@ const FEED_STALLED_SELECTOR: &str = "9a0423af";
 
 /// The bare venue name of a pAMM component, or `None` for any other protocol system.
 fn pamm_venue(protocol_system: &str) -> Option<&str> {
-    protocol_system
-        .strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
-        .or_else(|| protocol_system.strip_prefix(FALLBACK_PREFIX))
+    protocol_system.strip_prefix(PRICE_LEVEL_STREAM_PREFIX)
 }
 
 /// Counts, per protocol system, the pAMM swaps about to be simulated without the overrides their
@@ -2195,8 +2193,8 @@ fn pamm_venue(protocol_system: &str) -> Option<&str> {
 ///
 /// Split in two so a gap Titan could close is not confused with a venue it never serves: a venue
 /// whose protocol published nothing for this block counts as a miss, one Titan's override stream
-/// carries no channel for counts as unserved. Both fill on the router's Uniswap V3 pool instead of
-/// the venue, so neither swap compares a venue's quote against its own fill.
+/// carries no channel for counts as unserved. Either swap runs against the venue's mined state,
+/// where its freshness guard may reject the quote as stale.
 fn record_oracle_override_misses(
     execution_info: &HashMap<String, TychoExecutionInput>,
     overrides: Option<&BlockOverrides>,
@@ -2314,14 +2312,13 @@ mod tests {
 
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
-    #[case::through_the_router("fallback:fermiswap", Some("fermiswap"))]
     #[case::auto_detected(
         "pricelevelstream:0x5979458912f80b96d30d4220af8e2e4925a33320",
         Some("0x5979458912f80b96d30d4220af8e2e4925a33320")
     )]
     #[case::indexed_pamm("vm:fermiswap", None)]
     #[case::other_protocol("uniswap_v3", None)]
-    fn the_venue_is_read_from_either_pamm_family(
+    fn the_venue_is_read_from_price_level_components(
         #[case] protocol_system: &str,
         #[case] expected: Option<&str>,
     ) {
